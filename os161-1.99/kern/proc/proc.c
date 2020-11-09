@@ -50,6 +50,7 @@
 #include <vfs.h>
 #include <synch.h>
 #include <kern/fcntl.h>  
+#include "opt-A2.h"
 
 /*
  * The process for the kernel; this holds all the kernel-only threads.
@@ -69,7 +70,11 @@ static struct semaphore *proc_count_mutex;
 struct semaphore *no_proc_sem;   
 #endif  // UW
 
-
+#if OPT_A2
+static struct lock *pid_lock;
+static volatile pid_t cur_pid;
+static bool kernel_ready;
+#endif
 
 /*
  * Create a proc structure.
@@ -78,6 +83,9 @@ static
 struct proc *
 proc_create(const char *name)
 {
+#if OPT_A2
+  	KASSERT(cur_pid > 0);
+#endif
 	struct proc *proc;
 
 	proc = kmalloc(sizeof(*proc));
@@ -98,6 +106,20 @@ proc_create(const char *name)
 
 	/* VFS fields */
 	proc->p_cwd = NULL;
+#if OPT_A2
+	if (kernel_ready) {
+		lock_acquire(pid_lock);
+		proc->pid = cur_pid++;
+		lock_release(pid_lock);
+	} else {
+		proc->pid = cur_pid;
+		cur_pid++;
+	}
+	proc->parent = NULL;
+	proc->children = array_create();
+	proc->child_lock = lock_create("child_lock");
+	proc->dying = cv_create("dying");
+#endif
 
 #ifdef UW
 	proc->console = NULL;
@@ -136,6 +158,19 @@ proc_destroy(struct proc *proc)
 		proc->p_cwd = NULL;
 	}
 
+#if OPT_A2
+	lock_acquire(proc->child_lock);
+	while (array_num(proc->children) > 0) {
+		proc_info *info = array_get(proc->children, 0);
+		info->procedure->parent = NULL;
+		kfree(info);
+		array_remove(proc->children, 0);
+    }
+	array_destroy(proc->children);
+	lock_release(proc->child_lock);
+	cv_destroy(proc->dying);
+	lock_destroy(proc->child_lock);
+#endif
 
 #ifndef UW  // in the UW version, space destruction occurs in sys_exit, not here
 	if (proc->p_addrspace) {
@@ -193,10 +228,21 @@ proc_destroy(struct proc *proc)
 void
 proc_bootstrap(void)
 {
+#if OPT_A2
+	kernel_ready = false;
+	cur_pid = 1;
+	pid_lock = lock_create("pid_lock");
+	if (pid_lock == NULL) {
+		panic("lock_create for pid_lock failed\n");
+	}
+#endif
   kproc = proc_create("[kernel]");
   if (kproc == NULL) {
     panic("proc_create for kproc failed\n");
   }
+#if OPT_A2
+	kernel_ready = true;
+#endif
 #ifdef UW
   proc_count = 0;
   proc_count_mutex = sem_create("proc_count_mutex",1);
