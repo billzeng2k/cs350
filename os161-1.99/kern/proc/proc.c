@@ -107,6 +107,7 @@ proc_create(const char *name)
 	/* VFS fields */
 	proc->p_cwd = NULL;
 #if OPT_A2
+	proc->p_tf = NULL;
 	if (kernel_ready) {
 		lock_acquire(pid_lock);
 		proc->pid = cur_pid++;
